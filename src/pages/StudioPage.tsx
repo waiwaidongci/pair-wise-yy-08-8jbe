@@ -12,6 +12,7 @@ import { TrackTimeline } from '../components/TrackTimeline';
 import { TransportBar } from '../components/TransportBar';
 import { useStudioStore } from '../stores/studioStore';
 import type { AudioProject } from '../types/audio';
+import { assetLibrary, whenMigrationDone, withEmbeddedAudio } from '../utils/assetLibrary';
 import { audioEngine } from '../utils/audioEngine';
 
 export function StudioPage() {
@@ -25,6 +26,19 @@ export function StudioPage() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [recordingPulse, setRecordingPulse] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [migrationNotice, setMigrationNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    void whenMigrationDone().then((result) => {
+      if (result.failed.length) {
+        setMigrationNotice(
+          `检测到旧工程记录中的音频素材，${result.failed.length} 个未能迁入浏览器素材库（容量不足）：${result.failed
+            .map((name) => `「${name}」`)
+            .join('、')}。请清理浏览器空间后刷新页面重试；这些片段的声音暂存在工程记录中。`,
+        );
+      }
+    });
+  }, []);
   const mixKey = useMemo(
     () =>
       JSON.stringify(
@@ -137,17 +151,23 @@ export function StudioPage() {
     [],
   );
 
-  const saveProject = () => {
-    const content = JSON.stringify(project, null, 2);
-    const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${project.name.replaceAll('/', '-')}.waveforge.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    useStudioStore.getState().markSaved();
-    setMessage('工程 JSON 已导出，轨道与效果参数可在其他浏览器中继续编辑。');
+  const saveProject = async () => {
+    try {
+      // 导出时把素材库音频重新内嵌，JSON 工程在其他浏览器中也能继续编辑。
+      const exportable = await withEmbeddedAudio(project);
+      const content = JSON.stringify(exportable, null, 2);
+      const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${project.name.replaceAll('/', '-')}.waveforge.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      useStudioStore.getState().markSaved();
+      setMessage('工程 JSON 已导出，音频素材已内嵌，可在其他浏览器中继续编辑。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '工程导出失败');
+    }
   };
 
   const importProject = async (file?: File) => {
@@ -158,7 +178,7 @@ export function StudioPage() {
         throw new Error('不是有效的 WaveForge v1 工程文件');
       }
       audioEngine.stop();
-      replaceProject(parsed);
+      await replaceProject(parsed);
       setMessage(`已载入工程：${parsed.name}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '工程导入失败');
@@ -180,7 +200,7 @@ export function StudioPage() {
           <Stack direction="row" alignItems="center" spacing={1}>
             <span className="autosave-dot" />
             <Typography variant="caption" color="text.secondary">
-              轨道和效果参数自动保存到 localStorage
+              轨道、效果与素材索引自动保存；音频存于浏览器素材库，刷新不丢失
             </Typography>
           </Stack>
         </div>
@@ -223,6 +243,16 @@ export function StudioPage() {
         }}
         onSaveProject={saveProject}
       />
+
+      {migrationNotice && (
+        <Alert
+          severity="warning"
+          className="studio-message"
+          onClose={() => setMigrationNotice(null)}
+        >
+          {migrationNotice}
+        </Alert>
+      )}
 
       {message && (
         <Alert severity="info" className="studio-message" onClose={() => setMessage(null)}>

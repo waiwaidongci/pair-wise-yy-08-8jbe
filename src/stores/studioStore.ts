@@ -8,6 +8,12 @@ import type {
   ClipEffect,
   TrackColor,
 } from '../types/audio';
+import {
+  assetLibrary,
+  dataUrlToBlob,
+  STUDIO_PERSIST_KEY,
+  type AssetBlobEntry,
+} from '../utils/assetLibrary';
 import { SYNTHETIC_ASSETS } from '../utils/syntheticAudio';
 
 const TRACK_COLORS: TrackColor[] = ['#2563eb', '#0f9f7a', '#d97706', '#c2413b', '#7c3aed', '#0891b2'];
@@ -139,7 +145,8 @@ interface StudioState {
   updateTransport: (patch: Partial<Pick<AudioProject, 'bpm' | 'snap' | 'loopEnabled' | 'loopStart' | 'loopEnd' | 'pixelsPerSecond'>>) => void;
   importFile: (file: File) => Promise<void>;
   addRecordedBlob: (blob: Blob, duration: number) => Promise<void>;
-  replaceProject: (project: AudioProject) => void;
+  replaceProject: (project: AudioProject) => Promise<void>;
+  deleteAsset: (assetId: string) => Promise<void>;
   markSaved: () => void;
 }
 
@@ -171,15 +178,6 @@ function timestamp(project: AudioProject): AudioProject {
   return { ...project, updatedAt: Date.now() };
 }
 
-async function readFileAsDataUrl(file: File | Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error('读取音频文件失败'));
-    reader.readAsDataURL(file);
-  });
-}
-
 async function readAudioDuration(dataUrl: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const audio = document.createElement('audio');
@@ -192,6 +190,15 @@ async function readAudioDuration(dataUrl: string): Promise<number> {
     audio.onerror = () => reject(new Error('无法读取音频时长或格式不受浏览器支持'));
     audio.src = dataUrl;
   });
+}
+
+async function readAudioDurationFromBlob(blob: Blob): Promise<number> {
+  const url = URL.createObjectURL(blob);
+  try {
+    return await readAudioDuration(url);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function addAssetClip(project: AudioProject, trackId: string, asset: AudioAsset, start: number) {
@@ -372,20 +379,27 @@ export const useStudioStore = create<StudioState>()(
           project: timestamp({ ...state.project, ...patch }),
         })),
       importFile: async (file) => {
-        if (file.size > 8 * 1024 * 1024) {
-          throw new Error('单个音频文件请小于 8 MB，以避免浏览器本地存储超限');
-        }
-        const dataUrl = await readFileAsDataUrl(file);
-        const duration = await readAudioDuration(dataUrl);
+        const duration = await readAudioDurationFromBlob(file);
         const asset: AudioAsset = {
           id: uid('asset'),
           name: file.name.replace(/\.[^.]+$/, ''),
           source: 'imported',
           duration,
           mimeType: file.type || 'audio/mpeg',
-          dataUrl,
           size: file.size,
         };
+        // 先写入独立素材库；容量不足时直接拒绝，下方 set 不会执行，工程保持原状。
+        await assetLibrary.put(
+          {
+            id: asset.id,
+            name: asset.name,
+            mimeType: asset.mimeType,
+            duration: asset.duration,
+            source: asset.source,
+            size: asset.size ?? file.size,
+          },
+          file,
+        );
         set((state) => {
           const trackId = state.selectedTrackId || state.project.tracks[0].id;
           const project = addAssetClip(state.project, trackId, asset, state.playhead);
@@ -398,16 +412,26 @@ export const useStudioStore = create<StudioState>()(
         });
       },
       addRecordedBlob: async (blob, duration) => {
-        const dataUrl = await readFileAsDataUrl(blob);
         const asset: AudioAsset = {
           id: uid('record'),
           name: `录音 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
           source: 'recorded',
           duration,
           mimeType: blob.type || 'audio/webm',
-          dataUrl,
           size: blob.size,
         };
+        // 先写入独立素材库；写入失败（如容量不足）时工程不会被改动。
+        await assetLibrary.put(
+          {
+            id: asset.id,
+            name: asset.name,
+            mimeType: asset.mimeType,
+            duration: asset.duration,
+            source: asset.source,
+            size: asset.size ?? blob.size,
+          },
+          blob,
+        );
         set((state) => {
           const trackId = state.selectedTrackId || state.project.tracks[0].id;
           const project = addAssetClip(state.project, trackId, asset, state.playhead);
@@ -419,20 +443,70 @@ export const useStudioStore = create<StudioState>()(
           };
         });
       },
-      replaceProject: (project) =>
+      replaceProject: async (project) => {
+        // 工程文件内嵌的音频先迁入素材库；任一素材写不进（容量不足）则整体拒绝，当前工程保留。
+        const entries: AssetBlobEntry[] = [];
+        const assets = project.assets.map((asset) => {
+          if (asset.source !== 'synthetic' && asset.dataUrl) {
+            const blob = dataUrlToBlob(asset.dataUrl);
+            entries.push({
+              meta: {
+                id: asset.id,
+                name: asset.name,
+                mimeType: asset.mimeType || blob.type || 'audio/mpeg',
+                duration: asset.duration,
+                source: asset.source,
+                size: asset.size || blob.size,
+              },
+              blob,
+            });
+            const { dataUrl: _dataUrl, ...meta } = asset;
+            return meta;
+          }
+          return asset;
+        });
+        await assetLibrary.putAll(entries);
         set({
-          project: normalizeProject(project),
+          project: normalizeProject({ ...project, assets }),
           playhead: 0,
           isPlaying: false,
           selectedClipId: project.tracks.flatMap((track) => track.clips)[0]?.id ?? null,
           selectedTrackId: project.tracks[0]?.id ?? '',
-        }),
+        });
+      },
+      deleteAsset: async (assetId) => {
+        const state = get();
+        const asset = state.project.assets.find((item) => item.id === assetId);
+        if (!asset || asset.source === 'synthetic') return;
+        const inUse = state.project.tracks.some((track) =>
+          track.clips.some((clip) => clip.assetId === assetId),
+        );
+        if (inUse) return;
+        await assetLibrary.delete(assetId);
+        set((current) => ({
+          project: timestamp({
+            ...current.project,
+            assets: current.project.assets.filter((item) => item.id !== assetId),
+          }),
+        }));
+      },
       markSaved: () => set({ projectSavedAt: Date.now() }),
     }),
     {
-      name: 'pair-wise-yy-08-studio',
+      name: STUDIO_PERSIST_KEY,
       partialize: (state) => ({
-        project: state.project,
+        project: {
+          ...state.project,
+          // 音频正文保存在独立素材库，工程记录只保留素材索引（元数据）；
+          // 未能迁入素材库的素材保留内嵌音频，避免片段找不到声音。
+          assets: state.project.assets.map((asset) => {
+            if (asset.dataUrl && !assetLibrary.isKnownStored(asset.id)) {
+              return asset;
+            }
+            const { dataUrl: _dataUrl, ...meta } = asset;
+            return meta;
+          }),
+        },
         zoom: state.zoom,
         selectedClipId: state.selectedClipId,
         selectedTrackId: state.selectedTrackId,

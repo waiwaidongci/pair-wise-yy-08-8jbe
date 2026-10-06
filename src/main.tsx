@@ -5,6 +5,7 @@ import { Navigate, RouterProvider, createBrowserRouter } from 'react-router-dom'
 import { App } from './App';
 import { HelpPage } from './pages/HelpPage';
 import { StudioPage } from './pages/StudioPage';
+import { migrationReady } from './utils/assetLibrary';
 import './styles.css';
 
 const theme = createTheme({
@@ -41,11 +42,23 @@ const router = createBrowserRouter([
   },
 ]);
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <RouterProvider router={router} />
-    </ThemeProvider>
-  </StrictMode>,
-);
+const container = document.getElementById('root')!;
+
+async function bootstrap() {
+  container.innerHTML = '<div class="boot-loading">正在打开素材库…</div>';
+  try {
+    await migrationReady;
+  } catch {
+    // 迁移失败不应阻止进入工作站，片段会在缺失声音时给出提示。
+  }
+  createRoot(container).render(
+    <StrictMode>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <RouterProvider router={router} />
+      </ThemeProvider>
+    </StrictMode>,
+  );
+}
+
+void bootstrap();

@@ -1,4 +1,5 @@
 import type { AudioAsset, AudioProject, AudioTrack } from '../types/audio';
+import { resolveAssetUrl } from './assetLibrary';
 import { createSyntheticBuffer, isSyntheticAsset } from './syntheticAudio';
 
 export class AudioEngine {
@@ -26,10 +27,14 @@ export class AudioEngine {
     const cached = this.buffers.get(asset.id);
     if (cached) return cached;
     let buffer: AudioBuffer;
-    if (isSyntheticAsset(asset.id) || !asset.dataUrl) {
+    if (isSyntheticAsset(asset.id)) {
       buffer = createSyntheticBuffer(context, asset.id);
     } else {
-      const response = await fetch(asset.dataUrl);
+      const url = await resolveAssetUrl(asset);
+      if (!url) {
+        throw new Error(`素材「${asset.name}」的音频数据在浏览器素材库中找不到，请重新导入或录音`);
+      }
+      const response = await fetch(url);
       const arrayBuffer = await response.arrayBuffer();
       buffer = await context.decodeAudioData(arrayBuffer.slice(0));
     }

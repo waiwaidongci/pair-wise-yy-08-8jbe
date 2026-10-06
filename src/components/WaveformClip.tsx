@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import WaveSurfer from 'wavesurfer.js';
 import type { AudioAsset, AudioClip } from '../types/audio';
+import { assetLibrary } from '../utils/assetLibrary';
 import { getSyntheticAssetUrl, isSyntheticAsset } from '../utils/syntheticAudio';
 
 interface WaveformClipProps {
@@ -10,17 +11,51 @@ interface WaveformClipProps {
   color: string;
 }
 
+function useAssetUrl(asset: AudioAsset): { url: string | null; missing: boolean } {
+  const [url, setUrl] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setUrl(null);
+    setMissing(false);
+    if (isSyntheticAsset(asset.id)) {
+      setUrl(getSyntheticAssetUrl(asset.id));
+      return;
+    }
+    if (asset.dataUrl) {
+      setUrl(asset.dataUrl);
+      return;
+    }
+    void assetLibrary.getObjectUrl(asset.id).then((resolved) => {
+      if (cancelled) return;
+      if (resolved) {
+        setUrl(resolved);
+      } else {
+        setMissing(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset.id, asset.dataUrl]);
+
+  return { url, missing };
+}
+
 export function WaveformClip({ asset, clip, pixelsPerSecond, color }: WaveformClipProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const { url: sourceUrl, missing } = useAssetUrl(asset);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     container.replaceChildren();
-    const sourceUrl =
-      isSyntheticAsset(asset.id) || !asset.dataUrl
-        ? getSyntheticAssetUrl(asset.id)
-        : asset.dataUrl;
+    if (!sourceUrl) {
+      if (missing) container.dataset.error = '素材音频缺失';
+      return;
+    }
+    delete container.dataset.error;
     const wavesurfer = WaveSurfer.create({
       container,
       height: 58,
@@ -48,7 +83,7 @@ export function WaveformClip({ asset, clip, pixelsPerSecond, color }: WaveformCl
       disposed = true;
       wavesurfer.destroy();
     };
-  }, [asset.dataUrl, asset.id, clip.offset, color, pixelsPerSecond]);
+  }, [sourceUrl, missing, clip.offset, color, pixelsPerSecond]);
 
   return (
     <div className="waveform-clip" aria-label={`${clip.name} 波形`}>
