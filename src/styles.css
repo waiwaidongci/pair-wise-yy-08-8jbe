@@ -603,6 +603,21 @@ input {
   transform-origin: left top;
 }
 
+.waveform-missing {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #c2413b;
+  background: rgba(194, 65, 59, 0.08);
+  border: 1px dashed rgba(194, 65, 59, 0.5);
+  border-radius: 4px;
+}
+
 .trim-handle {
   position: absolute;
   z-index: 5;

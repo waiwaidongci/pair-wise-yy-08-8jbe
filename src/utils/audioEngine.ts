@@ -1,4 +1,5 @@
-import type { AudioAsset, AudioProject, AudioTrack } from '../types/audio';
+import type { AudioAsset, AudioProject } from '../types/audio';
+import { resolveAssetUrl } from './assetLibrary';
 import { createSyntheticBuffer, isSyntheticAsset } from './syntheticAudio';
 
 export class AudioEngine {
@@ -26,10 +27,12 @@ export class AudioEngine {
     const cached = this.buffers.get(asset.id);
     if (cached) return cached;
     let buffer: AudioBuffer;
-    if (isSyntheticAsset(asset.id) || !asset.dataUrl) {
+    if (isSyntheticAsset(asset.id)) {
       buffer = createSyntheticBuffer(context, asset.id);
     } else {
-      const response = await fetch(asset.dataUrl);
+      // 声音来自浏览器素材库（IndexedDB），旧迁移兜底时回退到内嵌 dataUrl。
+      const url = await resolveAssetUrl(asset);
+      const response = await fetch(url);
       const arrayBuffer = await response.arrayBuffer();
       buffer = await context.decodeAudioData(arrayBuffer.slice(0));
     }
@@ -55,7 +58,13 @@ export class AudioEngine {
         if (clipEnd <= from || clip.duration <= 0) continue;
         const asset = project.assets.find((item) => item.id === clip.assetId);
         if (!asset) continue;
-        const buffer = await this.getBuffer(asset);
+        let buffer: AudioBuffer;
+        try {
+          buffer = await this.getBuffer(asset);
+        } catch {
+          // 素材库中找不到声音（如数据被清理）时跳过该片段，不影响其余轨道。
+          continue;
+        }
         const source = context.createBufferSource();
         source.buffer = buffer;
         const graph = this.createClipGraph(context, track, clip);
@@ -101,7 +110,7 @@ export class AudioEngine {
 
   private createClipGraph(
     context: AudioContext,
-    track: AudioTrack,
+    track: AudioProject['tracks'][number],
     clip: AudioProject['tracks'][number]['clips'][number],
   ): { input: AudioNode; output: AudioNode; gain: GainNode } {
     const panner = context.createStereoPanner();

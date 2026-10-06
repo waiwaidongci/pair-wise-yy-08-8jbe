@@ -27,11 +27,17 @@ import { useEffect, useRef, useState } from 'react';
 import { useStudioStore } from '../stores/studioStore';
 import { SYNTHETIC_ASSETS } from '../utils/syntheticAudio';
 
+function formatSize(bytes?: number): string | null {
+  if (!bytes) return null;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 export function AssetLibrary() {
   const assets = useStudioStore((state) => state.project.assets);
   const selectedTrackId = useStudioStore((state) => state.selectedTrackId);
   const addClip = useStudioStore((state) => state.addClip);
-  const importFile = useStudioStore((state) => state.importFile);
+  const importFiles = useStudioStore((state) => state.importFiles);
   const addRecordedBlob = useStudioStore((state) => state.addRecordedBlob);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -52,14 +58,22 @@ export function AssetLibrary() {
     return () => window.clearInterval(timer);
   }, [recording]);
 
-  const handleImport = async (file?: File) => {
-    if (!file) return;
+  const customAssets = assets.filter((asset) => asset.source !== 'synthetic');
+  const totalSize = customAssets.reduce((sum, asset) => sum + (asset.size ?? 0), 0);
+  const pendingCount = customAssets.filter((asset) => asset.pendingMigration).length;
+
+  const handleImport = async (files?: FileList | File[] | null) => {
+    const list = files ? Array.from(files) : [];
+    if (list.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      await importFile(file);
+      await importFiles(list);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : '导入音频失败');
+      // 容量不足已在全局横幅展示并附文件清单，这里不重复弹错。
+      if (!useStudioStore.getState().storageFailure) {
+        setError(nextError instanceof Error ? nextError.message : '导入音频失败');
+      }
     } finally {
       setBusy(false);
     }
@@ -77,12 +91,16 @@ export function AssetLibrary() {
       recorder.onstop = async () => {
         const duration = Math.max(0.2, (performance.now() - recordStartedAt.current) / 1000);
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-        await addRecordedBlob(blob, duration);
         stream.getTracks().forEach((track) => track.stop());
         streamRef.current = null;
         recorderRef.current = null;
         setRecording(false);
         setRecordSeconds(0);
+        try {
+          await addRecordedBlob(blob, duration);
+        } catch (nextError) {
+          setError(nextError instanceof Error ? nextError.message : '录音保存失败');
+        }
       };
       recorder.start(250);
       recorderRef.current = recorder;
@@ -105,7 +123,7 @@ export function AssetLibrary() {
         <div>
           <Typography variant="subtitle2">素材库</Typography>
           <Typography variant="caption" color="text.secondary">
-            合成、录音与本地文件
+            音频存放在浏览器素材库，工程只保留索引
           </Typography>
         </div>
         <Chip size="small" label={`${assets.length} 项`} />
@@ -162,11 +180,16 @@ export function AssetLibrary() {
       </List>
 
       <Divider />
-      <Typography className="library-label" variant="caption">导入素材</Typography>
+      <Stack direction="row" alignItems="center" justifyContent="space-between">
+        <Typography className="library-label" variant="caption">素材库音频</Typography>
+        {formatSize(totalSize) && (
+          <Typography variant="caption" color="text.secondary">{formatSize(totalSize)}</Typography>
+        )}
+      </Stack>
       <List dense className="asset-list asset-list--scroll">
-        {assets
-          .filter((asset) => asset.source !== 'synthetic')
-          .map((asset) => (
+        {customAssets.map((asset) => {
+          const size = formatSize(asset.size);
+          return (
             <ListItem
               key={asset.id}
               secondaryAction={
@@ -181,15 +204,29 @@ export function AssetLibrary() {
                 {asset.source === 'recorded' ? <Mic color="error" /> : <AudioFile color="success" />}
               </ListItemIcon>
               <ListItemText
-                primary={asset.name}
-                secondary={`${asset.duration.toFixed(1)}s · ${asset.source === 'recorded' ? '浏览器录音' : '本地导入'}`}
+                primary={
+                  <Stack direction="row" alignItems="center" spacing={0.5}>
+                    <span>{asset.name}</span>
+                    {asset.pendingMigration && (
+                      <Chip size="small" color="warning" label="迁移待重试" />
+                    )}
+                  </Stack>
+                }
+                secondary={`${asset.duration.toFixed(1)}s${size ? ` · ${size}` : ''} · ${asset.source === 'recorded' ? '浏览器录音' : '本地导入'}`}
               />
             </ListItem>
-          ))}
-        {!assets.some((asset) => asset.source !== 'synthetic') && (
+          );
+        })}
+        {customAssets.length === 0 && (
           <Box className="asset-empty">尚未导入文件，内置素材已经可以直接编辑。</Box>
         )}
       </List>
+
+      {pendingCount > 0 && (
+        <Alert severity="warning">
+          有 {pendingCount} 个旧素材暂未迁入素材库，当前仍可播放；请释放存储空间后重新打开页面完成迁移。
+        </Alert>
+      )}
 
       <Button
         fullWidth
@@ -198,15 +235,16 @@ export function AssetLibrary() {
         disabled={busy || recording}
         onClick={() => fileInputRef.current?.click()}
       >
-        导入音频文件
+        {busy ? '正在写入素材库…' : '导入音频文件（可多选）'}
       </Button>
       <input
         ref={fileInputRef}
         hidden
         type="file"
         accept="audio/*"
+        multiple
         onChange={(event) => {
-          void handleImport(event.target.files?.[0]);
+          void handleImport(event.target.files);
           event.target.value = '';
         }}
       />

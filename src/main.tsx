@@ -1,11 +1,8 @@
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Navigate, RouterProvider, createBrowserRouter } from 'react-router-dom';
-import { App } from './App';
-import { HelpPage } from './pages/HelpPage';
-import { StudioPage } from './pages/StudioPage';
 import './styles.css';
+import { migrateLegacyStorage } from './utils/storageMigration';
 
 const theme = createTheme({
   palette: {
@@ -29,23 +26,38 @@ const theme = createTheme({
   },
 });
 
-const router = createBrowserRouter([
-  {
-    path: '/',
-    element: <App />,
-    children: [
-      { index: true, element: <Navigate to="/studio" replace /> },
-      { path: 'studio', element: <StudioPage /> },
-      { path: 'help', element: <HelpPage /> },
-    ],
-  },
-]);
+// 必须在 Store 创建前执行：旧工程里内嵌的音频先迁移进 IndexedDB 素材库，
+// Store 水合时拿到的就是“只有轨道、片段和素材索引”的新记录。
+async function bootstrap() {
+  await migrateLegacyStorage();
+  const [{ App }, { HelpPage }, { StudioPage }, { Navigate, RouterProvider, createBrowserRouter }] =
+    await Promise.all([
+      import('./App'),
+      import('./pages/HelpPage'),
+      import('./pages/StudioPage'),
+      import('react-router-dom'),
+    ]);
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <RouterProvider router={router} />
-    </ThemeProvider>
-  </StrictMode>,
-);
+  const router = createBrowserRouter([
+    {
+      path: '/',
+      element: <App />,
+      children: [
+        { index: true, element: <Navigate to="/studio" replace /> },
+        { path: 'studio', element: <StudioPage /> },
+        { path: 'help', element: <HelpPage /> },
+      ],
+    },
+  ]);
+
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <RouterProvider router={router} />
+      </ThemeProvider>
+    </StrictMode>,
+  );
+}
+
+void bootstrap();

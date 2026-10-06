@@ -4,14 +4,20 @@ import {
   GraphicEq,
   Save,
 } from '@mui/icons-material';
-import { Alert, Button, Stack, TextField, Typography } from '@mui/material';
+import {
+  Alert,
+  Button,
+  Stack,
+  TextField,
+  Typography,
+} from '@mui/material';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AssetLibrary } from '../components/AssetLibrary';
 import { ClipInspector } from '../components/ClipInspector';
 import { TrackTimeline } from '../components/TrackTimeline';
 import { TransportBar } from '../components/TransportBar';
 import { useStudioStore } from '../stores/studioStore';
-import type { AudioProject } from '../types/audio';
+import type { AudioProjectBundle } from '../types/audio';
 import { audioEngine } from '../utils/audioEngine';
 
 export function StudioPage() {
@@ -21,10 +27,18 @@ export function StudioPage() {
   const setPlaying = useStudioStore((state) => state.setPlaying);
   const setPlayhead = useStudioStore((state) => state.setPlayhead);
   const setProjectName = useStudioStore((state) => state.setProjectName);
-  const replaceProject = useStudioStore((state) => state.replaceProject);
+  const importProjectBundle = useStudioStore((state) => state.importProjectBundle);
+  const exportProjectBundle = useStudioStore((state) => state.exportProjectBundle);
+  const bootstrap = useStudioStore((state) => state.bootstrap);
+  const storageFailure = useStudioStore((state) => state.storageFailure);
+  const missingAssets = useStudioStore((state) => state.missingAssets);
+  const migrationNotice = useStudioStore((state) => state.migrationNotice);
+  const dismissStorageFailure = useStudioStore((state) => state.dismissStorageFailure);
+  const dismissMigrationNotice = useStudioStore((state) => state.dismissMigrationNotice);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [recordingPulse, setRecordingPulse] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const mixKey = useMemo(
     () =>
       JSON.stringify(
@@ -49,6 +63,18 @@ export function StudioPage() {
     [project.tracks],
   );
   const wasPlayingBeforeMixChange = useRef(false);
+
+  // 等持久化工程水合完成后，再合并浏览器素材库索引、检查片段引用的声音是否齐全。
+  useEffect(() => {
+    if (useStudioStore.persist.hasHydrated()) {
+      void bootstrap();
+      return;
+    }
+    const unlisten = useStudioStore.persist.onFinishHydration(() => {
+      void bootstrap();
+    });
+    return unlisten;
+  }, [bootstrap]);
 
   const beginPlayback = async (from: number) => {
     try {
@@ -137,31 +163,46 @@ export function StudioPage() {
     [],
   );
 
-  const saveProject = () => {
-    const content = JSON.stringify(project, null, 2);
-    const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${project.name.replaceAll('/', '-')}.waveforge.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    useStudioStore.getState().markSaved();
-    setMessage('工程 JSON 已导出，轨道与效果参数可在其他浏览器中继续编辑。');
+  const saveProject = async () => {
+    setBusy(true);
+    try {
+      const bundle = await exportProjectBundle();
+      const content = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${project.name.replaceAll('/', '-')}.waveforge.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      useStudioStore.getState().markSaved();
+      setMessage('工程 JSON 已导出（内嵌素材库音频），可在其他浏览器中继续编辑。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '工程导出失败');
+    } finally {
+      setBusy(false);
+    }
   };
 
   const importProject = async (file?: File) => {
     if (!file) return;
+    setBusy(true);
     try {
-      const parsed = JSON.parse(await file.text()) as AudioProject;
-      if (parsed.version !== 1 || !Array.isArray(parsed.tracks) || !Array.isArray(parsed.assets)) {
-        throw new Error('不是有效的 WaveForge v1 工程文件');
+      const parsed = JSON.parse(await file.text()) as AudioProjectBundle;
+      if (
+        (parsed.version !== 1 && parsed.version !== 2) ||
+        !Array.isArray(parsed.tracks) ||
+        !Array.isArray(parsed.assets)
+      ) {
+        throw new Error('不是有效的 WaveForge 工程文件');
       }
       audioEngine.stop();
-      replaceProject(parsed);
+      await importProjectBundle(parsed);
       setMessage(`已载入工程：${parsed.name}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '工程导入失败');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -180,7 +221,7 @@ export function StudioPage() {
           <Stack direction="row" alignItems="center" spacing={1}>
             <span className="autosave-dot" />
             <Typography variant="caption" color="text.secondary">
-              轨道和效果参数自动保存到 localStorage
+              轨道、片段与素材索引自动保存，音频保存在浏览器素材库
             </Typography>
           </Stack>
         </div>
@@ -188,14 +229,15 @@ export function StudioPage() {
           <Button
             variant="outlined"
             startIcon={<FolderOpen />}
+            disabled={busy}
             onClick={() => importInputRef.current?.click()}
           >
             导入工程
           </Button>
-          <Button variant="outlined" startIcon={<Download />} onClick={saveProject}>
+          <Button variant="outlined" startIcon={<Download />} disabled={busy} onClick={() => void saveProject()}>
             导出工程
           </Button>
-          <Button variant="contained" startIcon={<Save />} onClick={saveProject}>
+          <Button variant="contained" startIcon={<Save />} disabled={busy} onClick={() => void saveProject()}>
             保存
           </Button>
           <input
@@ -221,8 +263,39 @@ export function StudioPage() {
           window.setTimeout(() => setRecordingPulse(false), 1200);
           setMessage('录音入口位于左侧素材库，点击红色录音按钮即可开始。');
         }}
-        onSaveProject={saveProject}
+        onSaveProject={() => void saveProject()}
       />
+
+      {storageFailure && (
+        <Alert severity="error" className="studio-message" onClose={dismissStorageFailure}>
+          {storageFailure.message}，手头工程未被改动。
+          {storageFailure.failedFiles.length > 0 && (
+            <>
+              <br />
+              没存上的文件：{storageFailure.failedFiles.join('、')}
+            </>
+          )}
+        </Alert>
+      )}
+
+      {migrationNotice && (
+        <Alert
+          severity={migrationNotice.kind === 'partial' ? 'warning' : 'success'}
+          className="studio-message"
+          onClose={dismissMigrationNotice}
+        >
+          {migrationNotice.kind === 'success'
+            ? `已把 ${migrationNotice.migratedCount} 个旧音频迁移到浏览器素材库，工程记录现在只保留素材索引。`
+            : `已迁移 ${migrationNotice.migratedCount} 个旧音频；${migrationNotice.failedNames.length} 个因空间不足暂未迁移（仍可播放）：${migrationNotice.failedNames.join('、')}`}
+        </Alert>
+      )}
+
+      {missingAssets.length > 0 && (
+        <Alert severity="warning" className="studio-message">
+          有 {missingAssets.length} 个片段在素材库中找不到声音：{missingAssets.join('、')}
+          。工程与片段已保留，请重新导入对应音频。
+        </Alert>
+      )}
 
       {message && (
         <Alert severity="info" className="studio-message" onClose={() => setMessage(null)}>

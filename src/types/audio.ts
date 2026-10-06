@@ -8,8 +8,14 @@ export interface AudioAsset {
   source: AssetSource;
   duration: number;
   mimeType: string;
+  /** 仅用于：内置素材的旧版迁移暂存、工程 JSON 导入导出。工程记录里不持久化。 */
   dataUrl?: string;
   size?: number;
+  /**
+   * 旧数据迁移到 IndexedDB 失败时临时置位：声音仍以内嵌 dataUrl 兜底，
+   * 下次打开会继续尝试迁移，避免“有片段却找不到声音”。
+   */
+  pendingMigration?: boolean;
 }
 
 export interface AudioClip {
@@ -38,7 +44,7 @@ export interface AudioTrack {
 }
 
 export interface AudioProject {
-  version: 1;
+  version: number;
   name: string;
   bpm: number;
   snap: number;
@@ -47,6 +53,13 @@ export interface AudioProject {
   loopEnd: number;
   pixelsPerSecond: number;
   tracks: AudioTrack[];
+  /** 素材索引（仅元数据），音频内容存放在浏览器独立素材库 IndexedDB 中。 */
   assets: AudioAsset[];
   updatedAt: number;
 }
+
+/** 导出 / 旧版导入的工程文件格式，可能携带内嵌音频（v1 一定内嵌）。 */
+export type AudioProjectBundle = Omit<AudioProject, 'version'> & {
+  version: number;
+  assets: AudioAsset[];
+};
